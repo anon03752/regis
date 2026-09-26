@@ -46,6 +46,16 @@ def load_rule(ckpt_path, device="cpu"):
     """
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     a = ck["args"]
+    rule = build_rule(a)
+    key = "ema" if "ema" in ck else "nca_ema"
+    sd = {k[len("module."):] if k.startswith("module.") else k: v
+          for k, v in ck[key].items() if k != "n_averaged"}
+    rule.load_state_dict(sd, strict=True)
+    return rule.eval().to(device), a
+
+
+def build_rule(a):
+    """The untrained rule a run's settings describe."""
     # `or`, not a get() default: the slim checkpoints store g_arch as an
     # explicit None, which a default would never replace
     arch = a.get("g_arch") or "regis"
@@ -59,14 +69,8 @@ def load_rule(ckpt_path, device="cpu"):
                   damage_ceiling=a.get("damage_ceiling", 4.0), class_dim=class_dim)
     if is_control:
         dil = [int(x) for x in str(a.get("conv_dilations", "1,2,5,9")).split(",")]
-        rule = HeartControl(conv_base=a["conv_base"], conv_dilations=dil, **common)
-    else:
-        rule = HeartNCA(**common)
-    key = "ema" if "ema" in ck else "nca_ema"
-    sd = {k[len("module."):] if k.startswith("module.") else k: v
-          for k, v in ck[key].items() if k != "n_averaged"}
-    rule.load_state_dict(sd, strict=True)
-    return rule.eval().to(device), a
+        return HeartControl(conv_base=a["conv_base"], conv_dilations=dil, **common)
+    return HeartNCA(**common)
 
 
 def seed_batch(cohort_path, n, rng, device="cpu", n_hidden=6, wound=True,
@@ -100,8 +104,9 @@ def roll(rule, state, knockout=None, ko_mode="no-increase", record=False,
     """-> (settled, per_leg) or (settled, per_leg, every_step).
 
     `per_leg` is the state at the end of each leg, i.e. at each measured stage.
-    `record=True` additionally returns the per-channel mean inside each heart at
-    EVERY update, which is what the trajectory and cascade curves are made of.
+    `record=True` additionally returns the state before the first update and
+    after every update of the arc, 1 + 7 * `steps_per_leg` of them, which is what
+    the trajectory and cascade curves are made of.
 
     `knockout` is a channel index (or None) suppressed after every update:
 
@@ -115,7 +120,7 @@ def roll(rule, state, knockout=None, ko_mode="no-increase", record=False,
     """
     assert ko_mode in ("no-increase", "zero"), f"unknown ko_mode {ko_mode!r}"
     torch.manual_seed(seed)
-    per_leg, every = [], []
+    per_leg, every = [], ([state.clone()] if record else [])
 
     def suppress(x, prev):
         if knockout is None:

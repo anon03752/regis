@@ -1,8 +1,9 @@
 """MMSFM networks and sampling helpers.
 
 The heads operate on [-1, 1] images. Ising uses spin-flip antisymmetry
-and circular padding; MNIST uses a periodic time embedding. Drift
-converts the outputs to the samplers' [0, 1] coordinates."""
+and circular padding; MNIST and the hearts use a periodic time embedding.
+Drift converts the outputs to the samplers' [0, 1] coordinates, and
+one_transition integrates it."""
 import math
 import sys
 from pathlib import Path
@@ -97,3 +98,41 @@ class Drift(torch.nn.Module):
         ts, native = (t + phase).float(), (x * 2 - 1).float()
         flow, score = self.flow(ts, native), self.score(ts, native)
         return flow.double() / 2 + score.double() / 2
+
+
+def srk_schedule(dev, duration, steps):
+    """(start, length) of the SRK steps over one transition, as torchsde accumulates them"""
+    t, rows = 0., []
+    while t < duration:
+        end = min(t + duration / steps, duration)
+        rows.append((t, end - t))
+        t = end
+    return torch.tensor(rows, dtype=torch.float64, device=dev)
+
+
+def one_transition(drift, x, phase, schedule, sigma, gen, keep=None, tile=1):
+    """One transition: SRA1 (torchsde's additive-noise SRK) with Gaussian increments W and
+    space-time integrals U, term by term in torchsde's order (the order fixes the rounding).
+
+    `keep`, a 0/1 channel mask per sample, holds the masked channels' drift and noise at zero
+    at every internal stage: a knock-out that starts from a zeroed channel stays exactly zero.
+    With `tile` > 1 the batch is that many copies of one ensemble and they share its noise, as
+    if each copy were run alone from the same generator state: paired knock-outs in one pass."""
+    z = torch.randn((len(schedule), 2, len(x) // tile, *x.shape[1:]), device=x.device, dtype=x.dtype,
+                    generator=gen)
+    dts = schedule[:, 1].reshape(-1, *[1] * x.ndim)
+    W = dts.sqrt() * z[:, 0]
+    U = dts ** 1.5 * (.5 * z[:, 0] + z[:, 1] / (12 ** .5))    # Var U = dt^3/3, Cov(W, U) = dt^2/2
+    f = drift if keep is None else (lambda t, y, p: drift(t, y, p) * keep)
+    for (t0, dt), dw, du in zip(schedule, W, U):
+        if tile > 1:
+            dw, du = dw.repeat(tile, *[1] * (x.ndim - 1)), du.repeat(tile, *[1] * (x.ndim - 1))
+        if keep is not None:
+            dw, du = dw * keep, du * keep
+        rdt = 1 / dt
+        f0 = f(t0 + 0 * dt, x, phase)
+        y1 = x + (1 / 3) * f0 * dt + (sigma / 2) * (1 * dw + -1 * du * rdt)
+        h1 = x + (3 / 4) * f0 * dt + (sigma / 2) * ((3 / 2) * du * rdt)
+        f1 = f(t0 + (3 / 4) * dt, h1, phase)
+        x = y1 + (2 / 3) * f1 * dt + (sigma / 2) * (0 * dw + 1 * du * rdt)
+    return x

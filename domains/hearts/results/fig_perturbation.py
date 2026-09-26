@@ -76,9 +76,9 @@ def panel_cascade(axes, cache, real_dots=True):
         else d["meta"]["steps_per_leg"]
     curves = {b["channel"]: np.array(b["curve"]) for b in d["blocks"]}
     ctrl = np.array(d["ctrl"])
-    # leg position: the end of leg j is stage j, so a recorded step sits at
-    # j-1 + i/spl and the observed stages land on the integers
-    t = np.arange(1, ctrl.shape[0] + 1) / spl
+    # leg position: the wound at 0, and the end of leg j is stage j, so the
+    # observed stages land on the integers
+    t = np.arange(ctrl.shape[0]) / spl
     real = np.array(d["real"])
     conditions = ([("unperturbed", ctrl)]
                   + [(f"− {style.label(c)}", curves[c]) for c in d["cascade"]]

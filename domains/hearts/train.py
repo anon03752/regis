@@ -183,6 +183,11 @@ RECORD = dict(
 )
 
 
+# the RECORD weight each auxiliary-loss ablation sets to zero
+DROP = {"silhouette": "lam_shape", "capacity": "lam_capacity",
+        "heal": "lam_heal", "zero": "lam_zero"}
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Train REGIS or an ablation arm on the zebrafish cohort.")
     p.add_argument("--g-arch", choices=["regis", "control", "time"], default="regis",
@@ -196,8 +201,12 @@ def parse_args():
     p.add_argument("--holdout-heart", action="append", default=[],
                    help="isolate id (T#_S#); every section of that fish is dropped from "
                         "both the critic's banks and the seed pool")
+    p.add_argument("--drop-loss", choices=list(DROP), default=None,
+                   help="retrain without one auxiliary term: the auxiliary-loss ablations")
     p.add_argument("--smoke-test", action="store_true", help="tiny run for tests/test_smoke_hearts.py")
     a = argparse.Namespace(**RECORD, **vars(p.parse_args()))
+    if a.drop_loss:
+        setattr(a, DROP[a.drop_loss], 0.0)
     if a.smoke_test:
         a.iterations, a.batch_size, a.pool_size = 3, 4, 16
         a.steps_per_iter, a.log_every, a.ckpt_every, a.ema_warmup = 3, 1, 3, 2

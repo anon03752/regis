@@ -104,7 +104,7 @@ def test_smoke_hearts():
         for mode in ("no-increase", "zero"):
             settled, legs, every = R.roll(rule, state.clone(), knockout=3, ko_mode=mode,
                                           record=True, steps_per_leg=2, settle=2, seed=0)
-            assert len(legs) == R.N_LEGS and len(every) == R.N_LEGS * 2
+            assert len(legs) == R.N_LEGS and len(every) == 1 + R.N_LEGS * 2
             assert settled.shape == state.shape
         print(f"rollout: {R.N_LEGS} legs under both knockout modes")
 

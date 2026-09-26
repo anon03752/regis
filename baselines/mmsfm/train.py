@@ -1,4 +1,4 @@
-"""Train MMSFM on Ising or cycling-MNIST snapshots.
+"""Train MMSFM on Ising, cycling-MNIST or zebrafish-heart snapshots.
 
 Requires the upstream code downloaded by fetch_upstream.sh. SETTINGS holds
 the experiment configurations. Symmetry and eager/compiled gradient checks
@@ -14,16 +14,19 @@ import numpy as np
 import torch
 
 from baselines.mmsfm.net import build_heads, build_unets, configure_execution, periodic_time_embedding, upstream
+from domains.hearts import cohort as C
 from domains.ising.data import TIMES
 from workspace import WORK, resolve
 
 # Experiment settings: channels is U-Net width; attention lists feature-map sizes.
 # The loss uses the central (side-2*halo)^2 pixels. chunks splits a batch for
 # memory; accumulation combines batches before each optimiser update.
-SETTINGS = dict(ising=dict(channels=96, attention='48,24', side=192, halo=32, sigma=0.6, chunks=8, accumulation=1,
-                           steps=20000, data='ising_windows'),
-                mnist=dict(channels=64, attention='8,4', side=32, halo=0, sigma=0.15, chunks=1, accumulation=2,
-                           steps=40000, data='mnist/digitloop'))
+SETTINGS = dict(ising=dict(channels=96, attention='48,24', side=192, planes=1, halo=32, sigma=0.6, chunks=8,
+                           accumulation=1, steps=20000, data='ising_windows'),
+                mnist=dict(channels=64, attention='8,4', side=32, planes=1, halo=0, sigma=0.15, chunks=1,
+                           accumulation=2, steps=40000, data='mnist/digitloop'),
+                hearts=dict(channels=64, attention='12,6', side=48, planes=22, halo=0, sigma=0.05, chunks=1,
+                            accumulation=2, steps=40000, data='hearts'))
 WINDOW = 2   # upstream's K: each spline window spans K + 1 = 3 consecutive marginals (the paper's sliding triplets)
 BATCH_PER_WINDOW = 16   # samples per marginal in each window
 LR_MIN, LR_MAX, LR_WARMUP = 1e-8, 1e-4, 500   # linear up to LR_MAX over LR_WARMUP updates, then down to LR_MIN
@@ -217,12 +220,49 @@ def mnist(tr, s, data, dims, seed, device):
     return X, np.arange(len(X))/10, models, rng_state(), dict(period_max_abs=lambda m, t, x: m(t + 1, x)), config
 
 
+# held-out hearts, one per stage; training uses the other 27 (81 sections)
+VALIDATION_HEARTS = ('T1_S1', 'T2_S6', 'T3_S5', 'T4_S3', 'T5_S2', 'T6_S3', 'T7_S2', 'T8_S3')
+
+
+def heart_of(section_id):
+    """'T1_C2_S1' -> 'T1_S1': the three chips of a section share a heart"""
+    t, _chip, fish = section_id.split('_')
+    return f'{t}_{fish}'
+
+
+def hearts(tr, s, data, dims, seed, device):
+    """The heart runs: the loop uninjured -> 6 hpa -> ... -> 28 dpa -> uninjured with period
+    one in t (stage k at t = k/8), all 22 cohort channels generated jointly, plain heads on a
+    periodic clock. Returns what ising() returns."""
+    z = np.load(data/'hearts_48.npz', allow_pickle=False)   # composition is already native/2 - 1
+    train = np.array([heart_of(str(i)) not in VALIDATION_HEARTS for i in z['section_id']])
+    stage = np.array([C.TP_ORDER.index(str(t)) for t in z['timepoint']])
+    pools = [torch.from_numpy(z['composition'][train & (stage == k)]).to(device) for k in range(C.N_STAGES)]
+    # the aliases of stages 0 and 1 at t = 1 and 1.125 make the windows 6,7,0 and 7,0,1 wrap
+    X = [*pools, pools[0], pools[1]]
+    models = build_unets(tr, dims, s['channels'], s['attention'], device)
+    config = dict(domain='hearts', dims=dims, seed=seed, steps=s['steps'], checkpoint_steps=CHECKPOINT,
+                  n_steps_epoch=EPOCH, warmup_steps=LR_WARMUP, lr_min=LR_MIN, lr_max=LR_MAX, sigma=s['sigma'],
+                  channels=s['channels'], window=WINDOW, symmetry='none', cyclic=True, chunks=s['chunks'],
+                  spline='monotone cubic', batch_per_window=BATCH_PER_WINDOW, accumulation=s['accumulation'],
+                  effective_batch=BATCH_PER_WINDOW*(len(X)-WINDOW)*s['accumulation'], anchors=len(X),
+                  normalization='native cell units/2 - 1', tf32_matmul=True, tf32_cudnn=True,
+                  torch=str(torch.__version__), gpu=torch.cuda.get_device_name(), **UPSTREAM_COMMITS,
+                  data=str((data/'hearts_48.npz').resolve()), validation_hearts=list(VALIDATION_HEARTS),
+                  attention_resolutions=s['attention'], training_windows=len(X)-WINDOW,
+                  time_embedding='period-one integer Fourier harmonics 1..channels/2',
+                  parameters_per_network=sum(p.numel() for p in models[0].parameters()),
+                  train_counts=[len(x) for x in pools])
+    return X, np.arange(len(X))/C.N_STAGES, models, rng_state(), dict(period_max_abs=lambda m, t, x: m(t + 1, x)), config
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--domain', choices=['ising', 'mnist'], default='ising')
+    p.add_argument('--domain', choices=['ising', 'mnist', 'hearts'], default='ising')
     p.add_argument('--run-name', required=True, help='writes runs/<run-name>, which the cache or capture reads')
     p.add_argument('--data', type=resolve, help='marginals directory (default: data/ising_windows from '
-                   '`python -m domains.ising.data windows`, data/mnist/digitloop from `python -m domains.mnist.data digitloop`)')
+                   '`python -m domains.ising.data windows`, data/mnist/digitloop from `python -m domains.mnist.data digitloop`, '
+                   'data/hearts from `python -m domains.hearts.data_cohort`)')
     p.add_argument('--seed', type=int, default=0)
     a = p.parse_args()
     s = SETTINGS[a.domain]
@@ -234,10 +274,11 @@ def main():
     os.environ.update(MMSFM_VECSPLINE='1', MMSFM_CHUNKS=str(s['chunks']), MMSFM_HALO=str(s['halo']))
     tr = upstream()
     torch.set_num_threads(4)
-    if a.domain == 'ising':
-        configure_execution()
-    else:   # fp32 throughout, upstream's attention; the clock is periodic
+    if a.domain == 'mnist':   # fp32 throughout, upstream's attention
         torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+    else:
+        configure_execution()
+    if a.domain != 'ising':   # the loops' clock is periodic
         from torchcfm.models.unet import unet
         unet.timestep_embedding = periodic_time_embedding
     if not torch.cuda.is_available():
@@ -248,8 +289,8 @@ def main():
         json.dump(dict(unix_time=time.time()), f)
     seed_all(a.seed)
     device = 'cuda'
-    dims = (1, s['side'], s['side'])
-    setup = ising if a.domain == 'ising' else mnist
+    dims = (s['planes'], s['side'], s['side'])
+    setup = dict(ising=ising, mnist=mnist, hearts=hearts)[a.domain]
     X, zt, models, sampler_rng, twins, config = setup(tr, s, data, dims, a.seed, device)
     flow, score = models
     # sm=True here and below: also train the score head

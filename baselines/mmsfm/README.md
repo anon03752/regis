@@ -16,9 +16,11 @@ python -m domains.ising.data windows
 python -m baselines.mmsfm.train --run-name mmsfm_seed0 --seed 0
 python -m domains.mnist.data digitloop
 python -m baselines.mmsfm.train --domain mnist --run-name mnist_mmsfm_seed0 --seed 0
+python -m domains.hearts.data_cohort
+python -m baselines.mmsfm.train --domain hearts --run-name hearts_mmsfm_seed0 --seed 0
 ```
 
-Settings are in `SETTINGS` in `train.py` and saved to `runs/<run-name>/config.json`. Ising uses seeds 0–2 and takes about 18 h per run on one H100; MNIST uses seeds 0–6 and takes about 5 h. The driver checks symmetry and compiled gradients before training and saves a checkpoint every 2000 updates. Evaluation commands are in [Reproducing the paper](../../docs/reproduce.md).
+Settings are in `SETTINGS` in `train.py` and saved to `runs/<run-name>/config.json`. Ising uses seeds 0–2 and takes about 18 h per run on one H100; MNIST uses seeds 0–6 and takes about 5 h; the hearts use seeds 0–1 and take about 8 h. The driver checks symmetry and compiled gradients before training and saves a checkpoint every 2000 updates. Evaluation commands are in [Reproducing the paper](../../docs/reproduce.md).
 
 ## Upstream changes
 
@@ -28,7 +30,7 @@ Settings are in `SETTINGS` in `train.py` and saved to `runs/<run-name>/config.js
 - Adds batched spline evaluation (`MMSFM_VECSPLINE=1`).
 - Adds loss micro-batching (`MMSFM_CHUNKS`) and a central loss window (`MMSFM_HALO`).
 
-The OT correction is always active; the driver sets the optional environment variables. `net.py` adds Ising spin-flip antisymmetry and circular padding, and a periodic time embedding for MNIST.
+The OT correction is always active; the driver sets the optional environment variables. `net.py` adds Ising spin-flip antisymmetry and circular padding, and a periodic time embedding for MNIST and the hearts.
 
 ## Reproduction notes
 

@@ -34,7 +34,7 @@ from domains.hearts.results import runs
 from domains.hearts.rule import N_VISIBLE
 
 SEED = 0                  # the sample draw; fixed for every run of record
-N_ROLLOUTS = 64
+N_ROLLOUTS = 48
 # the 20 cell types plus damage: the same 21 channels the rollout records, so
 # the cache's channel list and its arrays cannot disagree
 CHANNELS = C.CELL_TYPES + [C.DAMAGE_CHANNEL]
@@ -74,10 +74,10 @@ def main():
     model_mean = curves.mean(dim=1).cpu().numpy()
     model_sd = curves.std(dim=1).cpu().numpy()
 
-    # hours at each recorded update: leg j carries the state from stage j-1 to
-    # stage j over `steps_per_leg` updates
+    # hours at each recorded state: the wound at 0, then leg j carries the state
+    # from stage j-1 to stage j over `steps_per_leg` updates
     hours = list(C.TIMEPOINTS.values())
-    rec = []
+    rec = [0.0]
     for j in range(1, C.N_STAGES):
         h0, h1 = hours[j - 1], hours[j]
         rec += [h0 + (h1 - h0) * (i + 1) / R.STEPS_PER_LEG

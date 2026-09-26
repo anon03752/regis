@@ -39,6 +39,8 @@ from domains.hearts.results import runs
 
 SEED = 0                  # the sample draw; fixed for every run of record
 N_SAMPLES = 64
+N_CONTROL = 3             # replicate rollouts averaged into the unblocked curve
+N_BLOCK = 2               # ... into each blocked curve and the uninjured control
 
 
 def main():
@@ -59,22 +61,23 @@ def main():
           f"({len(C.CASCADE)} cascade + {len(C.CASCADE_CONTROLS)} bystander) "
           f"+ an unblocked and an uninjured control", flush=True)
 
-    def curve(state, mask_, ko, seed):
-        """(T, n_visible): the cohort-mean abundance of every visible channel at
-        every update."""
-        _s, _legs, every = R.roll(rule, state.clone(), knockout=ko, ko_mode="zero",
-                                  record=True, seed=seed)
-        return R.heart_means(every, mask_).mean(dim=1).cpu().numpy()
+    def curve(state, mask_, ko, seed, reps):
+        """(1 + T, n_visible): each visible channel's mean abundance inside the
+        heart, averaged over `reps` replicate rollouts of all the samples."""
+        per = [R.heart_means(R.roll(rule, state.clone(), knockout=ko, ko_mode="zero",
+                                    record=True, seed=seed + r)[2], mask_)
+               for r in range(reps)]
+        return torch.cat(per, dim=1).mean(dim=1).cpu().numpy()
 
     out = {"run": a.run, "channels": C.CELL_TYPES, "cascade": C.CASCADE,
            "controls": C.CASCADE_CONTROLS,
-           "ctrl": curve(wounded, mask, None, 3000).tolist(),
-           "uninjured": curve(clean, mask_c, None, 3000).tolist(),
+           "ctrl": curve(wounded, mask, None, 3000, N_CONTROL).tolist(),
+           "uninjured": curve(clean, mask_c, None, 3100, N_BLOCK).tolist(),
            "blocks": []}
     print("  unblocked and uninjured controls done", flush=True)
     for k in blocks:
         out["blocks"].append({"ko": k, "channel": C.CELL_TYPES[k],
-                              "curve": curve(wounded, mask, k, 4000 + k).tolist()})
+                              "curve": curve(wounded, mask, k, 4000 + 10 * k, N_BLOCK).tolist()})
         print(f"  blocked {C.CELL_TYPES[k]}", flush=True)
 
     # the cohort's own abundances, for the dots the figures overlay
@@ -83,8 +86,8 @@ def main():
                            .sum(dim=(1, 2)) / (banks[tp][1][:, 0] > 0)
                            .sum(dim=(1, 2)).clamp_min(1)).mean())
                     for c in range(len(C.CELL_TYPES))] for tp in C.TP_ORDER]
-    out["meta"] = {"n_samples": N_SAMPLES, "ko_mode": "zero", "seed": SEED,
-                   "steps_per_leg": R.STEPS_PER_LEG}
+    out["meta"] = {"n_samples": N_SAMPLES, "n_control": N_CONTROL, "n_block": N_BLOCK,
+                   "ko_mode": "zero", "seed": SEED, "steps_per_leg": R.STEPS_PER_LEG}
 
     path = WORK / f"eval/hearts/cascade_{a.run}.json"
     path.parent.mkdir(parents=True, exist_ok=True)

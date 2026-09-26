@@ -26,9 +26,10 @@ You can generate short simulation videos from the included checkpoints using the
 ```bash
 python simulate_ising.py --output videos/ising.mp4
 python simulate_mnist.py --output videos/mnist.mp4
+python simulate_hearts.py --output videos/hearts.mp4
 ```
 
-Both scripts finish in under 1 minute when run on CPU.
+All three scripts finish in under 1 minute when run on CPU.
 
 ## Training
 

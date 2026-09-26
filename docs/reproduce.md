@@ -46,10 +46,12 @@ Scripts and output paths for the paper's figures and tables. Commands are listed
 | `fig:ising_strip_full`, generated fields, all methods | `fig_filmstrip512 full` | `figures/fig_ising_strip_full.pdf` |
 | **Heart regeneration** | | |
 | `fig:fig3_zebra`, panels B and C | `fig_perturbation` (hearts §4); panel A is drawn by hand | `figures/hearts/fig_perturbation_<run>.pdf` |
-| `tab:heart-group-support`, the a-priori grouping | `tables` (hearts §4) | `figures/hearts/table_grouping.tex` |
+| `tab:heart-group-support`, the a-priori grouping | `tables` (hearts §4) | `figures/hearts/table_heart_celltype_grouping.tex` |
+| `tab:heart-div`, section-to-section variability | `tables` | `figures/hearts/table_heart_variabiltiy.tex` |
 | `fig:app-hearts-perturbed-trajectory`, the knock-out filmstrip | `fig_unroll` | `figures/hearts/fig_unroll_<run>.pdf` |
 | `fig:app-hearts-group-recovery`, the per-seed figure | `fig_group_recovery` | `figures/hearts/fig_group_recovery.pdf` |
-| `tab:app-heart-group-recovery`, `tab:app-heart-fidelity` | `tables` | `figures/hearts/table_group_recovery.tex`, `table_fidelity.tex` |
+| `tab:app-heart-group-recovery`, `tab:app-heart-fidelity` | `tables` | `figures/hearts/table_heart_model_fidelity.tex` |
+| `tab:app-heart-aux-ablations`, the auxiliary losses | `tables` | `figures/hearts/table_heart_aux_ablation.tex` |
 
 ## Reproducing the cycling-MNIST experiment
 
@@ -247,11 +249,11 @@ The experiment's data is not in this repo, and the derived grid is not shipped: 
 # https://zenodo.org/records/14991776 -> Stereo-seq-regeneration.meta.txt (21.4 MB)
 #   the processed data for Li et al. 2025, Nat. Commun. 16:3716, CC BY 4.0.
 #   Attribution is a licence condition: cite the atlas in anything built on it.
-mv Stereo-seq-regeneration.meta.txt $REGIS_WORK/data/hearts/
+mkdir -p data/hearts && mv Stereo-seq-regeneration.meta.txt data/hearts/
 python -m domains.hearts.data_cohort        # -> data/hearts/hearts_48.npz
 ```
 
-Do not take the atlas from `db.cngb.org/stomics/zebrafish_VRH` instead: that site publishes only binary `.rds` and `.h5ad`, so it forces an R step to get the same table out of a 483 MB Seurat object. No expression data is used anywhere in this experiment — the channels are one-hot cell-type labels from the `annotation` column — so the Zenodo table is the whole input.
+No expression data is used anywhere in this experiment — the channels are one-hot cell-type labels from the `annotation` column — so the Zenodo table is the whole input.
 
 The producer checks its output against the invariants of the tensor the paper's runs trained on (105 sections, per-bin capacity within 4.0, nothing outside the section mask, and the measured per-stage damage profile) before writing, so a wrong or re-released download fails in seconds rather than after a day of training. Verified against that tensor: all 105 sections agree to 2.4e-7, the float32 round-trip of the output encoding, with masks bit-identical.
 
@@ -259,7 +261,7 @@ The 87 hand-painted wound footprints and 18 apex zones in `domains/hearts/annota
 
 ### 2. Training
 
-Fourteen runs of record: seven REGIS seeds, three per ablation arm, and one REGIS run holding a whole heart out. The three arms differ in `--g-arch` alone,
+Eighteen REGIS-family runs of record: seven REGIS seeds, three per ablation arm, one REGIS run holding a whole heart out, and four REGIS runs each without one auxiliary loss. The three arms differ in `--g-arch` alone:
 
 ```bash
 python -m domains.hearts.train --g-arch regis   --seed 0 --run-name hearts_regis_seed0
@@ -267,9 +269,28 @@ python -m domains.hearts.train --g-arch control --seed 0 --run-name hearts_contr
 python -m domains.hearts.train --g-arch time    --seed 0 --run-name hearts_time_seed0
 python -m domains.hearts.train --g-arch regis   --seed 0 --holdout-heart T1_S1 \
     --run-name hearts_regis_loo_T1_S1
+python -m domains.hearts.train --g-arch regis   --seed 0 --drop-loss silhouette \
+    --run-name hearts_regis_no_silhouette          # ... and capacity, heal, zero
 ```
 
-The configuration of every run is `RECORD` in the trainer; only the arm, the seed, the run name, the length and the held-out heart are flags. 100k iterations at batch 32, about 335 ms per iteration on one H100. `--g-arch time` is the ablation the experiment is built to fail: it hands the rule the stage label, so it can read a clock instead of building one.
+The configuration of every run is `RECORD` in the trainer; only the arm, the seed, the run name, the length, the held-out heart and the dropped loss are flags. 100k iterations at batch 32, about 335 ms per iteration on one H100. `--g-arch time` is the ablation the experiment is built to fail: it hands the rule the stage label, so it can read a clock instead of building one.
+
+The transport baselines train on the loop uninjured -> 6 hpa -> ... -> 28 dpa -> uninjured.
+
+**MMtSBM** (one run, training seed 13):
+```bash
+python -m domains.hearts.data_bridges      # data/hearts/bridges/: nine z-scored marginals, 21 channels
+python -m baselines.mmtsbm.train --run-name hearts_mmtsbm_seed0 --seed 13 --data data/hearts/bridges \
+  --prefix hearts_t --marginals 9 --sigma 1.2 --blocks 64,128,256
+```
+The two ends of the loop are disjoint halves of the 18 uninjured sections. The trainer's defaults do the rest: a 50k-step warm-up on independent couplings, then three IMF iterations of 12.5k steps. The checkpoint of record is the warm-up's, `ckpt_0000_forward.pt`: the fitting iterations degraded the cascade on this cohort. About 1.8 h on one H100.
+
+**MMSFM** (seeds 0 and 1; the authors' code, fetched and patched, see [baselines/mmsfm/](../baselines/mmsfm/README.md)):
+```bash
+bash baselines/mmsfm/fetch_upstream.sh
+python -m baselines.mmsfm.train --domain hearts --seed 0 --run-name hearts_mmsfm_seed0   # ... --seed 1, seed1
+```
+All 22 cohort channels are generated jointly, from the 81 sections of 27 training hearts; one heart per stage is held out (`VALIDATION_HEARTS`). Settings are in `SETTINGS['hearts']` in `baselines/mmsfm/train.py`. About 8 h per seed on one H100. The checkpoints of record were trained with an earlier copy of this driver, so a retrain reproduces their configuration, not their random stream.
 
 ### 3. Evaluation
 
@@ -283,12 +304,22 @@ for r in hearts_regis_seed0 ... ; do
 done
 ```
 
+The screen compares each heart with itself: 100 wounded sections, each rolled twice unperturbed and once per knock-out from the same start, and ρ(c) is the mean over hearts of the knock-out's difference from the first unperturbed run, divided by that heart's own rerun difference. The trajectories are 48 rollouts, recorded from the wound; the cascade averages three unperturbed replicates and two per block over 64 hearts.
+
+The transport baselines have their own instruments, which write the same caches:
+
+```bash
+python -m domains.hearts.instruments.mmtsbm --run hearts_mmtsbm_seed0   # profiles, chained and one-step; minutes
+python -m domains.hearts.instruments.mmsfm  --run hearts_mmsfm_seed0    # profiles, cascade, screen; ~4 min on one H100
+```
+MMtSBM carries the nine uninjured sections of the loop's first end along the bridges with the noise off, either chained or restarting each bridge from real sections; knock-outs are not run on it. MMSFM follows the protocol of the evaluation of record of these checkpoints: twelve rollouts (four noise replicas of the three held-out uninjured sections), a knock-out that holds a channel's state, drift and noise at zero at every solver stage, readouts over each sample's occupied support, and the held-out sections as the cohort reference. The chained MMtSBM rollout is deterministic and amplifies last-bit differences along the chain: on the marginals the paper's run used, this instrument reproduces its MMtSBM values to the digit (0.495 / 0.511 chained, 0.842 / 0.922 one-step, curves to 1e-7), while the marginals rebuilt from the download, which agree with those to 4e-6, move the chained values by about 0.1. MMSFM's noise stream is the one of record, so its values reproduce to floating-point execution.
+
 The two interventions are not the same operation. The screen clamps a channel to its pre-step value, so a type can decay but never be recruited — the closer analogue of a loss-of-function. The cascade read-out forces it to zero, because there the question is whether a downstream state can rise at all.
 
 ### 4. Tables and figures
 
 ```bash
-python -m domains.hearts.results.tables                       # the three appendix tables
+python -m domains.hearts.results.tables                       # the four appendix tables
 python -m domains.hearts.results.fig_perturbation --run hearts_regis_seed0
 python -m domains.hearts.results.fig_group_recovery           # one panel per model
 python -m domains.hearts.results.fig_marginals --run hearts_regis_seed0 \
@@ -297,13 +328,13 @@ python -m domains.hearts.results.fig_unroll --run hearts_regis_seed0
 python -m domains.hearts.results.fig_cohort                   # the observed sections
 ```
 
-Outputs land in `$REGIS_WORK/figures/hearts/`. The paper's figures are composites assembled from these panels, so the filenames differ: `fig_perturbation` is panels B and C of the main heart figure, `fig_group_recovery` the per-seed appendix figure, `fig_unroll` the knock-out filmstrip. Panel A of the main figure is a hand-drawn scheme and is not regenerated here.
+Outputs land in `figures/hearts/`. The paper's figures are composites assembled from these panels, so the filenames differ: `fig_perturbation` is panels B and C of the main heart figure, `fig_group_recovery` the per-seed appendix figure, `fig_unroll` the knock-out filmstrip. Panel A of the main figure is a hand-drawn scheme and is not regenerated here.
 
-`tables.py` names and skips any run without a cache, so both model tables build from a partial set of runs and simply carry fewer rows. Every per-seed row, family mean and across-seed sign test comes out of `domains/hearts/results/stats.py`; no cell is retyped and no summary line is computed by hand.
+`tables.py` writes the files the paper includes — `table_heart_model_fidelity`, `table_heart_aux_ablation`, `table_heart_celltype_grouping` and `table_heart_variabiltiy` — and names and skips any run without a cache, so the model tables build from a partial set of runs and simply carry fewer rows. Every per-seed row, family mean and across-seed sign test comes out of `domains/hearts/results/stats.py`; no cell is retyped and no summary line is computed by hand.
 
 ### 5. Naming
 
-`domains/hearts/results/runs.py` is the single source of run names (`hearts_regis_seed0..6`, `hearts_time_seed0..2`, `hearts_control_nonlocal_seed0..2`, `hearts_regis_loo_T1_S1`).
+`domains/hearts/results/runs.py` is the single source of run names (`hearts_regis_seed0..6`, `hearts_time_seed0..2`, `hearts_control_nonlocal_seed0..2`, `hearts_regis_loo_T1_S1`, `hearts_regis_no_{silhouette,capacity,heal,zero}`, `hearts_mmsfm_seed0..1`, `hearts_mmtsbm_seed0`).
 
 ### 6. Tests
 

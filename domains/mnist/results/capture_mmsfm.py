@@ -17,7 +17,8 @@ import torch
 import torch.nn.functional as F
 
 from workspace import WORK
-from baselines.mmsfm.net import Drift, build_unets, periodic_time_embedding, sdpa_attention, upstream
+from baselines.mmsfm.net import (Drift, build_unets, one_transition, periodic_time_embedding, sdpa_attention,
+                                  srk_schedule, upstream)
 from domains.mnist.classifier import load_classifier
 from domains.mnist.data import digits_by_class
 from domains.mnist.instruments.measure import PER, real_starts
@@ -26,33 +27,6 @@ from domains.mnist.results.capture_frames import KEEP
 
 NGRID = 4
 SHARDS, BATCH, STEPS = 6, 864, 160    # trajectories per batch (padded); SRK steps per transition
-
-
-def srk_schedule(dev):
-    """(start, length) of the SRK steps over one transition, as torchsde accumulates them"""
-    t, rows = 0., []
-    while t < .1:
-        end = min(t + .1 / STEPS, .1)
-        rows.append((t, end - t))
-        t = end
-    return torch.tensor(rows, dtype=torch.float64, device=dev)
-
-
-def one_transition(drift, x, phase, schedule, sigma, gen):
-    """One transition: SRA1 (torchsde's additive-noise SRK) with Gaussian increments W and
-    space-time integrals U, term by term in torchsde's order (the order fixes the rounding)"""
-    z = torch.randn((len(schedule), 2, *x.shape), device=x.device, dtype=x.dtype, generator=gen)
-    dts = schedule[:, 1].reshape(-1, *[1] * x.ndim)
-    W = dts.sqrt() * z[:, 0]
-    U = dts ** 1.5 * (.5 * z[:, 0] + z[:, 1] / (12 ** .5))    # Var U = dt^3/3, Cov(W, U) = dt^2/2
-    for (t0, dt), dw, du in zip(schedule, W, U):
-        rdt = 1 / dt
-        f0 = drift(t0 + 0 * dt, x, phase)
-        y1 = x + (1 / 3) * f0 * dt + (sigma / 2) * (1 * dw + -1 * du * rdt)
-        h1 = x + (3 / 4) * f0 * dt + (sigma / 2) * ((3 / 2) * du * rdt)
-        f1 = drift(t0 + (3 / 4) * dt, h1, phase)
-        x = y1 + (2 / 3) * f1 * dt + (sigma / 2) * (0 * dw + 1 * du * rdt)
-    return x
 
 
 def part_path(run, shard):
@@ -97,7 +71,7 @@ def capture_shard(run, shard):
     n, pad = len(idx), np.arange(BATCH) % len(idx)
     x = x0[idx][pad].to(dev, torch.float64)
     digit = torch.from_numpy(start[idx][pad]).to(dev)
-    schedule, gen = srk_schedule(dev), torch.Generator(device=dev).manual_seed(20269300 + shard)
+    schedule, gen = srk_schedule(dev, .1, STEPS), torch.Generator(device=dev).manual_seed(20269300 + shard)
 
     H = len(KEEP)
     frames, pred = np.zeros((H, n, 32, 32), np.float32), np.zeros((H, n), np.int16)

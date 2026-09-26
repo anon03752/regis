@@ -3,8 +3,8 @@
 After warm-up, each drift is fitted to endpoint pairs sampled with the
 opposite direction's EMA drift. Ising uses forward-only warm-up, circular
 padding, symmetry averaging, and a central loss window. MNIST trains both
-directions through warm-up and two IMF iterations. Commands and settings
-are in docs/reproduce.md."""
+directions through warm-up and two IMF iterations, hearts through warm-up and
+three. Commands and settings are in docs/reproduce.md."""
 from __future__ import annotations
 
 import argparse
@@ -26,16 +26,17 @@ CHUNK = 2048
 
 
 def load_marginals(data_dir: Path, n_marginals: int, device, prefix="ising_t"):
-    """Marginal i -> the (N, 1, H, W) float32 tensor in [-1, 1] stored at
-    <prefix><i>.pt (ising_t: Ising windows, +-1 spins; class_t: the MNIST
-    digit loop, grey levels)."""
+    """Marginal i -> the (N, C, H, W) float32 tensor stored at <prefix><i>.pt
+    (ising_t: Ising windows, +-1 spins; class_t: the MNIST digit loop, grey
+    levels; hearts_t: the 21 heart channels, z-scored)."""
     xs = []
     for i in range(n_marginals):
         f = data_dir / f"{prefix}{i}.pt"
         if not f.is_file():
             raise SystemExit(f"missing marginal {i} at {f}\n"
                              f"  (Ising: python -m domains.ising.data windows; "
-                             f"MNIST: python -m domains.mnist.data digitloop)")
+                             f"MNIST: python -m domains.mnist.data digitloop; "
+                             f"hearts: python -m domains.hearts.data_bridges)")
         xs.append(torch.load(f).to(device))
     return xs
 
@@ -115,10 +116,10 @@ def main():
     p.add_argument("--run-name", required=True)
     p.add_argument("--seed", type=int, default=13)
     p.add_argument("--data", default=str(WORK / "data" / "ising_windows"),
-                   help="directory of <prefix><i>.pt marginals, floats in [-1, 1]")
+                   help="directory of <prefix><i>.pt marginals")
     p.add_argument("--prefix", default="ising_t",
-                   help="marginal filename prefix: ising_t (Ising anchors) or "
-                        "class_t (MNIST digit loop)")
+                   help="marginal filename prefix: ising_t (Ising anchors), "
+                        "class_t (MNIST digit loop) or hearts_t (heart stages)")
     p.add_argument("--marginals", type=int, default=6)
     p.add_argument("--sigma", type=float, default=2.4,
                    help="bridge noise. The decisive knob: too small freezes "
@@ -175,6 +176,7 @@ def main():
     drifts, emas, opts = {}, {}, {}
     for d in ("forward", "backward"):
         drifts[d] = build_drift(side, blocks, args.layers_per_block,
+                                channels=marginals[0].shape[1],
                                 symmetrise=args.symmetrise,
                                 circular=args.circular).to(device)
         emas[d] = torch.optim.swa_utils.AveragedModel(

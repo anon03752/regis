@@ -87,13 +87,14 @@ def temporal_r(marginals_cache, channels=None) -> float:
 # ---- the cascade ------------------------------------------------------------
 
 def retention(cascade_cache) -> dict:
-    """-> {'downstream', 'upstream', 'control'}: the peak a border-zone state
-    keeps after a knockout, as a percentage of the SAME model's unblocked
-    rollout -- so each model is its own control and any amplitude bias cancels.
+    """-> {'downstream', 'upstream', 'control'}, each (mean, sd) over pooled
+    (blocked, affected) state pairs: the peak a border-zone state keeps after a
+    knock-out, as a percentage of the same model's unblocked peak, so each model
+    is its own control and amplitude bias cancels.
 
-    If the model has learnt the cascade as a chain, blocking a state suppresses
-    those downstream of it (low retention) and leaves those upstream intact
-    (near 100%). The bystander knockouts should leave all five intact.
+    A directional cascade shows low downstream retention with upstream and
+    control retention near 100%. The sd is the population s.d. over the pairs
+    of one run, as the auxiliary-loss table reports it.
     """
     d = load(cascade_cache)
     casc = [d["channels"].index(c) for c in d["cascade"]]
@@ -106,14 +107,14 @@ def retention(cascade_cache) -> dict:
         if k in curves:
             down += peak(curves[k], casc[pos + 1:])
             up += peak(curves[k], casc[:pos])
-    bystander = [x for c in d["controls"] if d["channels"].index(c) in curves
-                 for x in peak(curves[d["channels"].index(c)], casc)]
-    return {"downstream": float(np.mean(down)), "upstream": float(np.mean(up)),
-            "control": float(np.mean(bystander))}
+    control = [x for c in d["controls"] if d["channels"].index(c) in curves
+               for x in peak(curves[d["channels"].index(c)], casc)]
+    return {k: (float(np.mean(v)), float(np.std(v)))
+            for k, v in (("downstream", down), ("upstream", up), ("control", control))}
 
 
-def summarise(values) -> tuple[float, float]:
-    """mean +/- sample sd over a family's seeds, the form every summary line in
-    the tables takes."""
+def summarise(values, ddof) -> tuple[float, float]:
+    """mean +/- s.d. over a family's seeds. The group-recovery table reports the
+    population s.d. (ddof 0) and the fidelity table the sample s.d. (ddof 1)."""
     v = np.asarray(values, float)
-    return float(v.mean()), float(v.std(ddof=1)) if v.size > 1 else 0.0
+    return float(v.mean()), (float(v.std(ddof=ddof)) if v.size > ddof else 0.0)
