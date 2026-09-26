@@ -1,0 +1,22 @@
+# Tested torch/torchvision pair; minimum versions for the other dependencies.
+# See docs/reproduce.md for the original experiment environment.
+
+# --- core ---
+torch==2.13.0
+numpy>=1.26.4
+imageio-ffmpeg>=0.6.0
+scipy>=1.15.3
+matplotlib>=3.10.3
+
+# --- MMtSBM baseline: its U-Net ------------------------------------------------
+diffusers>=0.35.1
+
+# --- MNIST ------------------------------------------------------------------
+torchvision==0.28.0
+
+# --- heart regeneration -----------------------------------------------------
+# Nothing new. The cohort producer reads its one input with the csv module
+# rather than pandas, and torchvision (above) supplies the augmentation.
+
+# --- optional: MMSFM baseline only -----------------------------------------
+# pip install torchsde==0.2.6 POT joblib tqdm wandb   (see baselines/mmsfm/README.md)

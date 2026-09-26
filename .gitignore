@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+runs/
+data/
+eval/
+figures/
+videos/
+baselines/mmsfm/upstream/

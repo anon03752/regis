@@ -1,0 +1,148 @@
+diff -ruN a/mmsfm/multimarginal_cfm.py b/mmsfm/multimarginal_cfm.py
+--- a/mmsfm/multimarginal_cfm.py
++++ b/mmsfm/multimarginal_cfm.py
+@@ -1,5 +1,7 @@
+ import warnings
+ import numpy as np
++import os
++_VECSPLINE = os.environ.get('MMSFM_VECSPLINE', '0') == '1'   ## regis: batched spline evaluation
+ import torch
+ from scipy.interpolate import (
+     CubicSpline,
+@@ -217,6 +219,13 @@
+     def _compute_store_cubic_splines(self, z, zt):
+         ## SIDE EFFECT - STORES A LIST INTO THE OBJECT'S MEMORY
+         self.cs_list.clear()
++        if _VECSPLINE:
++            ## regis: one interpolator over all samples' columns
++            ## (scipy fits every column independently -> identical numbers), one device copy
++            y = z.detach().cpu().numpy()
++            self._cs_shape = y.shape[1:]
++            self._cs_batched = self.spline_fn(zt, y.reshape(y.shape[0], -1), axis=0)
++            return
+         self.cs_list = [self.spline_fn(zt, z[:, b, :].cpu().detach().numpy()) \
+                         for b in range(z.shape[1])]
+ 
+@@ -232,13 +241,37 @@
+         self.batch_slopes /= self.zt_diff[np.newaxis, :, np.newaxis]  # type: ignore
+ 
+     def _cubic_mu_t(self, z, t):
++        if _VECSPLINE:
++            return self._cubic_batched(t, 0)
+         mu = np.zeros((z.shape[1], z.shape[2]))
+         for b in range(z.shape[1]):
+             cs = self.cs_list[b]
+             mu[b] = cs(t[b].item())
+         return mu
+ 
++    def _cubic_batched(self, t, nu):
++        ## evaluate sample b's spline at its own t[b] straight from the piecewise-polynomial
++        ## coefficients (what scipy's __call__ does per sample, without the Python loop)
++        B, D = self._cs_shape
++        cs = self._cs_batched                                            # PPoly: c (k+1, n_int, B*D), x (n_int+1,)
++        tn = t.detach().cpu().numpy().astype(cs.x.dtype)                 # one sync
++        idx = np.clip(np.searchsorted(cs.x, tn, side='right') - 1, 0, cs.c.shape[1] - 1)   # interval of each t
++        dx = tn - cs.x[idx]                                              # (B,)
++        c = cs.c.reshape(cs.c.shape[0], cs.c.shape[1], B, D)[:, idx, np.arange(B), :]     # (k+1, B, D)
++        k = c.shape[0] - 1
++        if nu:                                                           # first derivative, Horner
++            out = np.zeros((B, D))
++            for j in range(k):
++                out = out * dx[:, None] + (k - j) * c[j]
++            return out
++        out = np.zeros((B, D))
++        for j in range(k + 1):
++            out = out * dx[:, None] + c[j]
++        return out
++
+     def _cubic_mu_t_prime(self, z, t):
++        if _VECSPLINE:
++            return self._cubic_batched(t, 1)
+         mu_prime = np.zeros((z.shape[1], z.shape[2]))
+         for b in range(z.shape[1]):
+             cs = self.cs_list[b]
+diff -ruN a/mmsfm/multimarginal_otsampler.py b/mmsfm/multimarginal_otsampler.py
+--- a/mmsfm/multimarginal_otsampler.py
++++ b/mmsfm/multimarginal_otsampler.py
+@@ -42,7 +42,8 @@
+         for k in range(2, M):
+             ## find OT between prev sample and batch from next marginal
+             pi_k = self.get_map(zhat[k-1], z[k])
+-            j = self.sample_cond_map(pi_k, i, replace=replace)
++            ## pi_k rows index the rebatched zhat[k-1], not the original z[0].
++            j = self.sample_cond_map(pi_k, np.arange(bs), replace=replace)
+             zhat[k] = z[k, j]
+             i = j  ## update conditioning idx
+ 
+diff -ruN a/scripts/images/images_train.py b/scripts/images/images_train.py
+--- a/scripts/images/images_train.py
++++ b/scripts/images/images_train.py
+@@ -1,3 +1,4 @@
++import os
+ import numpy as np
+ import torch
+ import torch.nn as nn
+@@ -294,6 +295,15 @@
+     return retcode
+ 
+ 
++## regis: with MMSFM_HALO=h set, score the losses only on the central (side-2h)^2 box of
++## each window; the ring is context, never a regression target.
++def _halo_crop(x, dims):
++    h = int(os.environ.get('MMSFM_HALO', '0'))
++    if not h:
++        return x
++    return x.view(x.shape[0], *dims)[..., h:-h, h:-h]
++
++
+ def train_epoch(
+     run,
+     X,
+@@ -336,25 +346,33 @@
+                 assert not torch.any(torch.isnan(eps) | torch.isinf(eps))  # type: ignore
+                 assert not torch.any(torch.isnan(ab) | torch.isinf(ab))  # type: ignore
+ 
+-                vt = model(t, xt)
+-                assert not torch.any(torch.isnan(vt) | torch.isinf(vt))
+-                loss = torch.mean((vt - ut) ** 2)
+-                flow_losses[epoch_num, i] += loss.item()
+-
++                ## regis: micro-batch the forward/backward over the same sampled batch (MMSFM_CHUNKS
++                ## chunks, one by default). Each chunk's mean loss is weighted by its fraction of the
++                ## batch, so the summed gradient equals the full-batch one; memory only.
++                n_chunks = int(os.environ.get('MMSFM_CHUNKS', '1'))
++                N = t.shape[0]
+                 if sm:
+                     lambda_t = FM.compute_lambda(t, ab)
+                     ## check that all lambda_t values are valid (no nans and no infs)
+                     assert not torch.any(torch.isnan(lambda_t) | torch.isinf(lambda_t))
+ 
+-                    st = score_model(t, xt).view(eps.shape)  # type: ignore
+-                    assert not torch.any(torch.isnan(st) | torch.isinf(st))
+-
+-                    score_loss = torch.mean((lambda_t[:, None] * st + eps) ** 2)
+-                    score_losses[epoch_num, i] += score_loss.item()
+-                    loss += score_loss
+-
+-                loss /= accum_steps
+-                loss.backward()
++                loss_acc = 0.0
++                vt = st = None
++                for ci in torch.arange(N, device=t.device).chunk(n_chunks):
++                    w = ci.numel() / N
++                    vt_c = model(t[ci], xt[ci])
++                    assert not torch.any(torch.isnan(vt_c) | torch.isinf(vt_c))
++                    l_c = torch.mean(_halo_crop(vt_c - ut[ci], dims) ** 2) * w
++                    flow_losses[epoch_num, i] += l_c.item()
++                    if sm:
++                        st_c = score_model(t[ci], xt[ci]).view(eps[ci].shape)  # type: ignore
++                        assert not torch.any(torch.isnan(st_c) | torch.isinf(st_c))
++                        s_c = torch.mean(_halo_crop(lambda_t[ci][:, None] * st_c + eps[ci], dims) ** 2) * w  # type: ignore
++                        score_losses[epoch_num, i] += s_c.item()
++                        l_c = l_c + s_c
++                    (l_c / accum_steps).backward()
++                    loss_acc += l_c.item()
++                loss = torch.tensor(loss_acc)
+             except:
+                 last_valid = {
+                     'model_state_dict' : model.state_dict(),
